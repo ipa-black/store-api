@@ -1,0 +1,11 @@
+name = "feather-catalog"
+main = "worker.js"
+compatibility_date = "2026-10-23"
+
+[triggers]
+crons = ["*/10 * * * *"]
+
+[[d1_databases]]
+binding = "DB"
+database_name = "feather-db"
+database_id = "ضع_معرف_قاعدة_البيانات_هنا_مثلا_abc12345-..."
