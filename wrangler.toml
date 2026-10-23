@@ -8,4 +8,4 @@ crons = ["*/10 * * * *"]
 [[d1_databases]]
 binding = "DB"
 database_name = "feather-db"
-database_id = "ضع_معرف_قاعدة_البيانات_هنا_مثلا_abc12345-..."
+database_id = "29c87528-f35f-4f4c-9fb8-ec60d21f37aa"
