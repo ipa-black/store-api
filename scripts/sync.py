@@ -36,7 +36,13 @@ def clean_url(value):
     try:
         value = text(value)
 
-        if not value or re.search(r"[\x00-\x1f\x7f]", value):
+        if not value:
+            return None
+
+        if any(
+            ord(char) < 32 or ord(char) == 127
+            for char in value
+        ):
             return None
 
         parsed = urlsplit(value)
@@ -135,10 +141,7 @@ def fetch_json(url):
 
     for attempt in range(3):
         try:
-            request = Request(
-                url,
-                headers=headers,
-            )
+            request = Request(url, headers=headers)
 
             with urlopen(
                 request,
@@ -272,10 +275,7 @@ def normalize_app(row, source, index):
         "downloadURL": download,
     }
 
-    size = row.get(
-        "size",
-        latest.get("size"),
-    )
+    size = row.get("size", latest.get("size"))
 
     if isinstance(size, str) and size.isdigit():
         size = int(size)
@@ -305,18 +305,11 @@ def merge_apps(records):
 
     for record in records:
         bundle = record["app"]["bundleIdentifier"]
-
-        groups.setdefault(
-            bundle,
-            [],
-        ).append(record)
+        groups.setdefault(bundle, []).append(record)
 
     result = []
 
-    for bundle in sorted(
-        groups,
-        key=str.casefold,
-    ):
+    for bundle in sorted(groups, key=str.casefold):
         rows = sorted(
             groups[bundle],
             key=lambda item: (
@@ -360,9 +353,7 @@ def merge_apps(records):
                 }
 
             builds[key]["labels"].add(
-                current["name"]
-                + " | "
-                + record["source"]
+                current["name"] + " | " + record["source"]
             )
 
         app["versions"] = []
@@ -371,10 +362,7 @@ def merge_apps(records):
             entry["build"]["localizedDescription"] = (
                 "; ".join(sorted(entry["labels"]))
             )
-
-            app["versions"].append(
-                entry["build"]
-            )
+            app["versions"].append(entry["build"])
 
         app["localizedDescription"] = (
             "Sources: "
@@ -391,13 +379,7 @@ def merge_apps(records):
     return result
 
 
-def make_source(
-    apps,
-    suffix,
-    name,
-    base_url,
-    path,
-):
+def make_source(apps, suffix, name, base_url, path):
     identifier = (
         SOURCE_ID
         if suffix == "all"
@@ -413,9 +395,7 @@ def make_source(
     }
 
     if base_url:
-        source["sourceURL"] = (
-            base_url + "/" + path
-        )
+        source["sourceURL"] = base_url + "/" + path
 
     return source
 
@@ -424,9 +404,7 @@ def validate_source(source):
     apps = source["apps"]
 
     if not apps:
-        raise ValueError(
-            "Generated source is empty"
-        )
+        raise ValueError("Generated source is empty")
 
     identifiers = {
         app["bundleIdentifier"]
@@ -434,9 +412,7 @@ def validate_source(source):
     }
 
     if len(identifiers) != len(apps):
-        raise ValueError(
-            "Duplicate app identifiers"
-        )
+        raise ValueError("Duplicate app identifiers")
 
     required_fields = (
         "name",
@@ -467,13 +443,16 @@ def validate_source(source):
         ]
 
         for url in urls:
-            if (
-                clean_url(url) != url
-                or re.search(
-                    r'[\x00-\x20\x7f<>"{}|\\^`$begin:math:display$$end:math:display$]',
-                    url,
-                )
-            ):
+            invalid_chars = any(
+                ord(char) <= 32
+                or ord(char) in {
+                    34, 60, 62, 91, 92, 93, 94,
+                    96, 123, 124, 125, 127,
+                }
+                for char in url
+            )
+
+            if clean_url(url) != url or invalid_chars:
                 raise ValueError(
                     "Invalid encoded URL: " + url
                 )
@@ -512,8 +491,8 @@ def generate(catalogs, base_url):
         ]
 
         records.extend(current)
-
         apps = merge_apps(current)
+
         filename = "sources/" + name + ".json"
 
         source = make_source(
@@ -608,10 +587,7 @@ def generate(catalogs, base_url):
 
 def save_outputs(outputs):
     root = Path("public")
-    root.mkdir(
-        parents=True,
-        exist_ok=True,
-    )
+    root.mkdir(parents=True, exist_ok=True)
 
     status_path = root / "status.json"
 
@@ -623,17 +599,13 @@ def save_outputs(outputs):
         else {}
     )
 
-    old_date = old_status.pop(
-        "checkedAt",
-        None,
-    )
+    old_date = old_status.pop("checkedAt", None)
 
     if (
         old_status == outputs["status.json"]
         and old_date
     ):
         outputs["status.json"]["checkedAt"] = old_date
-
     else:
         outputs["status.json"]["checkedAt"] = (
             datetime.now(timezone.utc).strftime(
@@ -643,7 +615,6 @@ def save_outputs(outputs):
 
     for filename, data in outputs.items():
         target = root / filename
-
         target.parent.mkdir(
             parents=True,
             exist_ok=True,
@@ -671,25 +642,16 @@ def save_outputs(outputs):
         )
 
         try:
-            with os.fdopen(
-                descriptor,
-                "wb",
-            ) as handle:
+            with os.fdopen(descriptor, "wb") as handle:
                 handle.write(content)
 
-            os.replace(
-                temporary,
-                target,
-            )
+            os.replace(temporary, target)
 
         finally:
             if os.path.exists(temporary):
                 os.unlink(temporary)
 
-    for old in old_status.get(
-        "catalogs",
-        {},
-    ).values():
+    for old in old_status.get("catalogs", {}).values():
         filename = old.get("file", "")
 
         if (
@@ -699,32 +661,19 @@ def save_outputs(outputs):
             )
             and filename not in outputs
         ):
-            (root / filename).unlink(
-                missing_ok=True
-            )
+            (root / filename).unlink(missing_ok=True)
 
 
 def main():
     names = discover_catalogs()
 
-    with ThreadPoolExecutor(
-        max_workers=4
-    ) as executor:
+    with ThreadPoolExecutor(max_workers=4) as executor:
         catalogs = list(
-            executor.map(
-                load_catalog,
-                names,
-            )
+            executor.map(load_catalog, names)
         )
 
-    repository = os.environ.get(
-        "GITHUB_REPOSITORY"
-    )
-
-    branch = os.environ.get(
-        "GITHUB_REF_NAME",
-        "main",
-    )
+    repository = os.environ.get("GITHUB_REPOSITORY")
+    branch = os.environ.get("GITHUB_REF_NAME", "main")
 
     base_url = (
         "https://raw.githubusercontent.com/"
@@ -736,11 +685,7 @@ def main():
         else None
     )
 
-    outputs = generate(
-        catalogs,
-        base_url,
-    )
-
+    outputs = generate(catalogs, base_url)
     save_outputs(outputs)
 
     status = outputs["status.json"]
@@ -753,9 +698,7 @@ def main():
         )
     )
 
-    summary_path = os.environ.get(
-        "GITHUB_STEP_SUMMARY"
-    )
+    summary_path = os.environ.get("GITHUB_STEP_SUMMARY")
 
     if summary_path:
         with open(
