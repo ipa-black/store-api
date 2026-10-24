@@ -1,0 +1,54 @@
+name: IPA BLACK Auto Sync
+
+on:
+  workflow_dispatch:
+
+  schedule:
+    - cron: '17 * * * *'
+
+  push:
+    paths:
+      - 'scripts/**'
+      - '.github/workflows/sync.yml'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: ipa-black-catalog-sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    name: Update IPA BLACK sources
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Fetch and generate IPA BLACK sources
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python scripts/sync.py
+
+      - name: Save updated sources
+        run: |
+          git config user.name 'IPA BLACK'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+
+          git add -- public/
+
+          if git diff --cached --quiet; then
+            echo 'IPA BLACK sources are unchanged.'
+            exit 0
+          fi
+
+          git commit -m 'IPA BLACK: update apps and games'
+          git push origin HEAD
