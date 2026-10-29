@@ -479,43 +479,114 @@ def validate_source(source):
             )
 
 
-def generate(catalogs, base_url):
+def safe_catalog_error(error):
+    # Status files and Actions annotations must never include signed URL tokens.
+    message = re.sub(r"https?://\S+", "<URL>", str(error))
+    return " ".join(message.split())[:240]
+
+
+def load_catalog_safely(name):
+    try:
+        return load_catalog(name)
+    except Exception as error:
+        # Preserve the catalog name so generate() can recover only that source.
+        return name, {"_sync_fetch_error": safe_catalog_error(error)}, ""
+
+
+def cached_catalog_records(source, name):
+    # Cached per-source catalogs already contain normalized apps and may contain
+    # several builds of one bundle. Keep every existing version/download pair.
+    validate_source(source)
+    records = []
+    for app in source["apps"]:
+        for build in app["versions"]:
+            row = dict(app)
+            row["versions"] = []
+            row["version"] = build["version"]
+            row["downloadURL"] = build["downloadURL"]
+            row.pop("versionDate", None)
+            row.pop("size", None)
+            if "date" in build:
+                row["versionDate"] = build["date"]
+            if "size" in build:
+                row["size"] = build["size"]
+            records.append(normalize_app(row, name, len(records)))
+    return records
+
+
+def generate(catalogs, base_url, cache_dir="public"):
     outputs = {}
     records = []
     catalog_info = {}
+    fresh_catalogs = []
+    cached_catalogs = []
+    cache_root = Path(cache_dir)
+    previous_status_path = cache_root / "status.json"
+    previous_status = (
+        json.loads(previous_status_path.read_text(encoding="utf-8"))
+        if previous_status_path.is_file()
+        else {}
+    )
 
     for name, data, digest in sorted(catalogs):
-        current = [
-            normalize_app(row, name, index)
-            for index, row in enumerate(data["apps"])
-        ]
+        if not re.fullmatch(r"[a-zA-Z0-9_-]+", name):
+            raise ValueError("Invalid catalog name")
+        filename = "sources/" + name + ".json"
+        failure = None
+        try:
+            if data.get("_sync_fetch_error"):
+                raise ValueError(data["_sync_fetch_error"])
+            current = [
+                normalize_app(row, name, index)
+                for index, row in enumerate(data["apps"])
+            ]
+            apps = merge_apps(current)
+            source = make_source(
+                apps=apps,
+                suffix=name,
+                name=SOURCE_NAME + " - " + (text(data.get("name")) or name),
+                base_url=base_url,
+                path=filename,
+            )
+            validate_source(source)
+        except (ValueError, TypeError, KeyError, IndexError) as error:
+            failure = safe_catalog_error(error)
+            cache_path = cache_root / filename
+            if not cache_path.is_file():
+                raise ValueError(
+                    name + ": upstream unavailable and no usable cached catalog; " + failure
+                ) from error
+            try:
+                raw_cache = cache_path.read_bytes()
+                source = json.loads(raw_cache)
+                current = cached_catalog_records(source, name)
+                apps = source["apps"]
+            except (ValueError, TypeError, KeyError, IndexError) as cached_error:
+                raise ValueError(
+                    name + ": upstream unavailable and cached catalog invalid; no publication"
+                ) from cached_error
+            digest = previous_status.get("catalogs", {}).get(name, {}).get("sha256") or hashlib.sha256(raw_cache).hexdigest()
+            cached_catalogs.append(name)
+            annotation = (name + ": kept previous catalog; upstream not updated: " + failure)
+            annotation = annotation.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+            print("::warning title=Catalog preserved::" + annotation)
+        else:
+            fresh_catalogs.append(name)
 
         records.extend(current)
-        apps = merge_apps(current)
-
-        filename = "sources/" + name + ".json"
-
-        source = make_source(
-            apps=apps,
-            suffix=name,
-            name=(
-                SOURCE_NAME
-                + " - "
-                + (text(data.get("name")) or name)
-            ),
-            base_url=base_url,
-            path=filename,
-        )
-
-        validate_source(source)
         outputs[filename] = source
-
         catalog_info[name] = {
             "inputRecords": len(current),
             "apps": len(apps),
             "sha256": digest,
             "file": filename,
+            "usingCache": failure is not None,
         }
+        if failure is not None:
+            catalog_info[name]["upstreamError"] = failure
+
+    if not fresh_catalogs:
+        raise ValueError("All upstream catalogs failed validation; existing source was preserved without claiming a fresh update")
 
     apps = merge_apps(records)
 
@@ -580,6 +651,9 @@ def generate(catalogs, base_url):
         "apps": len(apps),
         "currentBuilds": len(actual),
         "testApps": len(test_apps),
+        "freshCatalogs": fresh_catalogs,
+        "cachedCatalogs": cached_catalogs,
+        "degraded": bool(cached_catalogs),
     }
 
     return outputs
@@ -669,11 +743,11 @@ def main():
 
     with ThreadPoolExecutor(max_workers=4) as executor:
         catalogs = list(
-            executor.map(load_catalog, names)
+            executor.map(load_catalog_safely, names)
         )
 
     repository = os.environ.get("GITHUB_REPOSITORY")
-    branch = os.environ.get("GITHUB_REF_NAME", "main")
+    branch = "main"
 
     base_url = (
         "https://raw.githubusercontent.com/"
@@ -710,7 +784,16 @@ def main():
                 f"# {SOURCE_NAME}\n\n"
                 f"Apps: {status['apps']}\n\n"
                 f"Catalogs: {len(catalogs)}\n\n"
+                f"Validated from upstream: {len(status['freshCatalogs'])}\n\n"
+                f"Kept from previous snapshot: {len(status['cachedCatalogs'])}\n\n"
             )
+            for name in status["cachedCatalogs"]:
+                handle.write(
+                    "- `" + name + "`: previous catalog kept; "
+                    + status["catalogs"][name]["upstreamError"] + "\n"
+                )
+            if status["cachedCatalogs"]:
+                handle.write("\nSome upstream catalogs were not updated; no IPA URLs were invented.\n\n")
 
             if base_url:
                 handle.write(
